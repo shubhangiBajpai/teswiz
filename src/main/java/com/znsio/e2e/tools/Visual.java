@@ -21,6 +21,7 @@ import com.znsio.e2e.entities.APPLITOOLS;
 import com.znsio.e2e.entities.Platform;
 import com.znsio.e2e.entities.TEST_CONTEXT;
 import com.znsio.e2e.exceptions.InvalidTestDataException;
+import com.znsio.e2e.exceptions.VisualTestSetupException;
 import com.znsio.e2e.runner.Runner;
 import org.apache.log4j.Logger;
 import org.assertj.core.api.SoftAssertions;
@@ -45,6 +46,7 @@ public class Visual {
     private static final String DEFAULT_APPLITOOLS_SERVER_URL = "https://eyesapi.applitools.com";
     private static final String DEBUG = "DEBUG";
     private static final String INFO = "INFO";
+    private static final String WARN = "WARN";
     private final String visualTestNotEnabledMessage = "Visual Test is not enabled";
     private final com.applitools.eyes.selenium.Eyes eyesOnWeb;
     private final com.applitools.eyes.appium.Eyes eyesOnApp;
@@ -93,7 +95,7 @@ public class Visual {
         com.applitools.eyes.appium.Eyes appEyes = new com.applitools.eyes.appium.Eyes(appiumEyesRunner);
 
         appEyes.setServerUrl(getValueFromConfig(APPLITOOLS.SERVER_URL, DEFAULT_APPLITOOLS_SERVER_URL));
-        appEyes.setApiKey(getValueFromConfig(APPLITOOLS.API_KEY, NOT_SET));
+        appEyes.setApiKey(getApplitoolsAPIKey(isVisualTestingEnabled));
         appEyes.setBatch((BatchInfo) getValueFromConfig(APPLITOOLS.BATCH_NAME));
         appEyes.setBranchName(String.valueOf(getValueFromConfig(BRANCH_NAME)));
         appEyes.setEnvName(targetEnvironment);
@@ -110,12 +112,20 @@ public class Visual {
         appEyes.addProperty(RUN_IN_CI, String.valueOf(getValueFromConfig(RUN_IN_CI)));
         appEyes.addProperty(TARGET_ENVIRONMENT, String.valueOf(getValueFromConfig(TARGET_ENVIRONMENT)));
         appEyes.addProperty("USER_NAME", USER_NAME);
-
-        if(isVisualTestingEnabled) {
+        try {
             appEyes.open(innerDriver, appName + "-" + platform, testName);
+            LOGGER.info("instantiateAppiumEyes: Is Applitools Visual Testing enabled? - " + !appEyes.getIsDisabled());
+        } catch(IllegalArgumentException e) {
+            String message = String.format("Exception in instantiating Applitools for Web: '%s', Closing Web-driver instance", e.getMessage());
+            LOGGER.error(message);
+            innerDriver.quit();
+            throw new VisualTestSetupException(message, e);
         }
-        LOGGER.info("instantiateAppiumEyes: Is Applitools Visual Testing enabled? - " + !appEyes.getIsDisabled());
         return appEyes;
+    }
+
+    private String getApplitoolsAPIKey(boolean isVisualTestingEnabled) {
+        return isVisualTestingEnabled? getValueFromConfig(APPLITOOLS.API_KEY, null) : getValueFromConfig(APPLITOOLS.API_KEY, NOT_SET);
     }
 
     private com.applitools.eyes.selenium.Eyes instantiateWebEyes(String driverType, Platform platform, WebDriver innerDriver, String appName, String testName,
@@ -134,6 +144,7 @@ public class Visual {
         Configuration configuration = webEyes.getConfiguration();
         configuration.setServerUrl(getValueFromConfig(APPLITOOLS.SERVER_URL, DEFAULT_APPLITOOLS_SERVER_URL));
         configuration.setApiKey(getValueFromConfig(APPLITOOLS.API_KEY, NOT_SET));
+        configuration.setApiKey(getApplitoolsAPIKey(isVisualTestingEnabled));
         configuration.setBatch((BatchInfo) getValueFromConfig(APPLITOOLS.BATCH_NAME));
 
         configuration.setBranchName(String.valueOf(getValueFromConfig(BRANCH_NAME)));
@@ -165,13 +176,21 @@ public class Visual {
         RectangleSize setBrowserViewPortSize = getBrowserViewPortSize(driverType, innerDriver);
         LOGGER.info("Using browser dimensions for Applitools: " + setBrowserViewPortSize);
 
-        webEyes.open(innerDriver, appName + "-" + platform, testName, setBrowserViewPortSize);
-        LOGGER.info("instantiateWebEyes:  Is Applitools Visual Testing enabled? - " + !webEyes.getIsDisabled());
+        try {
+            webEyes.open(innerDriver, appName + "-" + platform, testName, setBrowserViewPortSize);
+            LOGGER.info("instantiateWebEyes:  Is Applitools Visual Testing enabled? - " + !webEyes.getIsDisabled());
+        } catch(IllegalArgumentException | EyesException e) {
+            String message = String.format("Exception in instantiating Applitools for Web: '%s', Closing Web-driver instance", e.getMessage());
+            LOGGER.error(message);
+            innerDriver.quit();
+            throw new VisualTestSetupException(message, e);
+
+        }
         return webEyes;
     }
 
     private String getValueFromConfig(String key, String defaultValue) {
-        return (null == applitoolsConfig.get(key)) ? defaultValue : String.valueOf(applitoolsConfig.get(key));
+        return (null == applitoolsConfig.get(key) || applitoolsConfig.get(key).equals("null")) ? defaultValue : String.valueOf(applitoolsConfig.get(key));
     }
 
     private Object getValueFromConfig(String key) {
@@ -451,6 +470,11 @@ public class Visual {
                                                  .equals(TestResultsStatus.Unresolved) || result.getStatus()
                                                                                                 .equals(TestResultsStatus.Failed);
         LOGGER.info("Visual testing differences found? - " + areVisualDifferenceFound);
+        if (areVisualDifferenceFound) {
+            ReportPortal.emitLog("Visual testing differences found? - " + areVisualDifferenceFound, WARN, new Date());
+        } else {
+            ReportPortal.emitLog("Visual testing differences found? - " + areVisualDifferenceFound, INFO, new Date());
+        }
         long threadId = Thread.currentThread()
                               .getId();
         SoftAssertions softly = Runner.getSoftAssertion(threadId);
