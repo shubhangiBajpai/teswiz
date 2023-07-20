@@ -9,6 +9,7 @@ import com.znsio.teswiz.tools.JsonFile;
 import com.znsio.teswiz.tools.JsonSchemaValidator;
 import com.znsio.teswiz.tools.ReportPortalLogger;
 import com.znsio.teswiz.tools.cmd.CommandLineExecutor;
+import com.znsio.teswiz.tools.cmd.CommandLineResponse;
 import io.github.bonigarcia.wdm.WebDriverManager;
 import io.github.bonigarcia.wdm.config.DriverManagerType;
 import org.apache.log4j.Logger;
@@ -17,6 +18,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.openqa.selenium.*;
 import org.openqa.selenium.chrome.ChromeDriver;
+import org.openqa.selenium.chrome.ChromeDriverLogLevel;
 import org.openqa.selenium.chrome.ChromeOptions;
 import org.openqa.selenium.firefox.FirefoxDriver;
 import org.openqa.selenium.firefox.FirefoxDriverLogLevel;
@@ -24,16 +26,20 @@ import org.openqa.selenium.firefox.FirefoxOptions;
 import org.openqa.selenium.firefox.FirefoxProfile;
 import org.openqa.selenium.logging.LogType;
 import org.openqa.selenium.logging.LoggingPreferences;
-import org.openqa.selenium.remote.CapabilityType;
-import org.openqa.selenium.remote.DesiredCapabilities;
 import org.openqa.selenium.remote.RemoteWebDriver;
 import org.openqa.selenium.safari.SafariDriver;
 import org.openqa.selenium.safari.SafariOptions;
+
 import java.io.File;
 import java.net.MalformedURLException;
 import java.net.URL;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.logging.Level;
+
+import static com.znsio.teswiz.runner.DeviceSetup.getCloudNameFromCapabilities;
 import static com.znsio.teswiz.runner.Runner.*;
 import static com.znsio.teswiz.runner.Setup.CAPS;
 
@@ -193,21 +199,33 @@ class BrowserDriverManager {
     private static DriverManagerType setupBrowserDriver(TestExecutionContext testExecutionContext,
                                                         String browserType) {
         DriverManagerType driverManagerType = DriverManagerType.valueOf(browserType.toUpperCase());
-        String webDriverManagerProxyUrl = (null == Runner.getWebDriverManagerProxyURL()) ? ""
-                                                                                         :
-                                          Runner.getWebDriverManagerProxyURL();
+        String webDriverManagerProxyUrl = (null == Runner.getWebDriverManagerProxyURL()) ? "" : Runner.getWebDriverManagerProxyURL();
         LOGGER.info(String.format(
                 "Using webDriverManagerProxyUrl: '%s' for getting the WebDriver for browser: '%s'",
                 webDriverManagerProxyUrl, browserType));
 
         // TODO - get browser version from local or container. What about cloud?
+        String browserVersion = NOT_SET;
+        if (Runner.isRunningInCI() && getCloudNameFromCapabilities().equalsIgnoreCase("docker")) {
+            LOGGER.info("Running in docker. Get driver for browser in docker");
+            String[] getBrowserVersionFromDockerCommand = new String[] {"cURL -s --request GET " +
+                                                        "'http://localhost:" + Runner.getRemoteDriverGridPort() + "/status'" +
+                                                       " | jq -r -M  '.value" +
+                               ".nodes[].slots[].stereotype | select(.browserName == \"" + browserType + "\") " +
+                                                                "| .browserVersion '"};
+            CommandLineResponse commandLineResponse = CommandLineExecutor.execCommand(getBrowserVersionFromDockerCommand);
+            browserVersion = commandLineResponse.getStdOut().split("\n")[0];
+            LOGGER.info(String.format("%s browser version in docker container: %s", browserType, browserVersion));
+        }
         WebDriverManager webDriverManager = WebDriverManager.getInstance(driverManagerType)
                                                             .proxy(webDriverManagerProxyUrl);
+        if (!browserVersion.equalsIgnoreCase(NOT_SET)) {
+            webDriverManager.browserVersion(browserVersion);
+        }
         webDriverManager.setup();
         String downloadedDriverVersion = webDriverManager.getDownloadedDriverVersion();
 
-        String message = String.format("Using %s browser version: %s", driverManagerType,
-                                       downloadedDriverVersion);
+        String message = String.format("Using %s browser version: %s", driverManagerType, downloadedDriverVersion);
         LOGGER.info(message);
         ReportPortalLogger.logInfoMessage(message);
         return driverManagerType;
@@ -224,8 +242,6 @@ class BrowserDriverManager {
         String proxyUrl = Runner.getProxyURL();
 
         ChromeOptions chromeOptions = new ChromeOptions();
-        chromeOptions.addArguments("--disable-gpu");
-
         setLogFileName(forUserPersona, testExecutionContext, "Chrome");
 
         JSONArray excludeSwitches = chromeConfiguration.getJSONArray(EXCLUDE_SWITCHES);
@@ -243,9 +259,13 @@ class BrowserDriverManager {
         LoggingPreferences logPrefs = new LoggingPreferences();
         if(enableVerboseLogging) {
             System.setProperty("webdriver.chrome.verboseLogging", "true");
+            chromeOptions.setLogLevel(ChromeDriverLogLevel.DEBUG);
+            logPrefs.enable(LogType.BROWSER, Level.ALL);
             logPrefs.enable(LogType.PERFORMANCE, Level.ALL);
         } else {
-            logPrefs.enable(LogType.BROWSER, Level.ALL);
+            chromeOptions.setLogLevel(ChromeDriverLogLevel.INFO);
+            logPrefs.enable(LogType.BROWSER, Level.INFO);
+            logPrefs.enable(LogType.PERFORMANCE, Level.INFO);
         }
         chromeOptions.setCapability(ChromeOptions.LOGGING_PREFS, logPrefs);
 
@@ -336,13 +356,14 @@ class BrowserDriverManager {
         LoggingPreferences logPrefs = new LoggingPreferences();
         if(enableVerboseLogging) {
             firefoxOptions.setLogLevel(FirefoxDriverLogLevel.DEBUG);
+            logPrefs.enable(LogType.BROWSER, Level.ALL);
             logPrefs.enable(LogType.PERFORMANCE, Level.ALL);
         } else {
             firefoxOptions.setLogLevel(FirefoxDriverLogLevel.INFO);
-            logPrefs.enable(LogType.BROWSER, Level.ALL);
+            logPrefs.enable(LogType.BROWSER, Level.INFO);
+            logPrefs.enable(LogType.PERFORMANCE, Level.INFO);
         }
-        // todo - fix
-//        firefoxOptions.setCapability(FirefoxOptions.LOGGING_PREFS, logPrefs);
+        firefoxOptions.setCapability("moz:firefoxOptions",logPrefs);
 
         if(null != proxyUrl) {
             LOGGER.info(SETTING_PROXY_FOR_BROWSER + proxyUrl);
@@ -454,7 +475,7 @@ class BrowserDriverManager {
                 capabilities = BrowserStackSetup.updateBrowserStackCapabilities(capabilities);
             }
             
-            LOGGER.info(String.format("Starting RemoteWebDriver using url: %s", remoteUrl));
+            LOGGER.info(String.format("Starting RemoteWebDriver using url: %s with capabilities: '%s'", remoteUrl, capabilities));
             RemoteWebDriver remoteWebDriver = new RemoteWebDriver(new URL(remoteUrl),
                     capabilities);
             LOGGER.info(String.format("RemoteWebDriver created using url: %s", remoteUrl));
